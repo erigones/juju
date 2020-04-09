@@ -155,6 +155,10 @@ func (env *joyentEnviron) StartInstance(ctx context.ProviderCallContext, args en
     instTags := toDanubeTags(args.InstanceConfig.Tags)
     instMdata := map[string]string{"cloud-init:user-data": string(userData)}
 
+    imgInfo, err := env.ensureImagePresent(spec.Image.Id)
+	if err != nil {
+		return nil, err
+	}
 
 	createMachineOpts := cloudapi.CreateMachineOpts {
 		Vm: cloudapi.MachineDefinition {
@@ -168,9 +172,10 @@ func (env *joyentEnviron) StartInstance(ctx context.ProviderCallContext, args en
 		},
 		Disks: []cloudapi.VmDiskDefinition {
 			{
-				//Size: 11000,
-				//Image:  "ubuntu-certified-18.04",
-				Image:  spec.Image.Id,
+                // If disk size was not requested, RootDisk is zero.
+                // That means the resulting json will not contain disk size request.
+				Size:   int(spec.InstanceType.RootDisk),
+				Image:  imgInfo.Name,
 			},
 		},
 		Nics: []cloudapi.VmNicDefinition {
@@ -180,18 +185,10 @@ func (env *joyentEnviron) StartInstance(ctx context.ProviderCallContext, args en
 		},
 	}
 
+    logger.Debugf("Creating new machine with following parameters: %+v", createMachineOpts)
+
 	var machine *cloudapi.MachineDefinition
 	machine, err = env.compute.cloudapi.CreateMachine(createMachineOpts)
-        /*
-		//J XXX !!!
-		// zatial tam network dam natvrdo, potom uvidime co s tym
-		// co s name? (default: alias = hostname, dns_domain = domainname(hostname))
-      cloudapi.CreateMachineOpts{
-		Package:  spec.InstanceType.Name,
-		Image:    spec.Image.Id,
-		Mdata:    map[string]string{"metadata.cloud-init:user-data": string(userData)},
-		Tags:     toDanubeTags(args.InstanceConfig.Tags),
-	})*/
 	if err != nil {
 		return nil, errors.Annotate(err, "cannot create instances")
 	}
@@ -265,28 +262,14 @@ func toDanubeTags(tags map[string]string) []string {
 func (env *joyentEnviron) filteredInstances(ctx context.ProviderCallContext, statusFilters ...string) ([]instances.Instance, error) {
 	instances := []instances.Instance{}
 
-	/* DELME XXX
-	filter := cloudapi.NewFilter()
-	filter.Set("group", "juju")
-	filter.Set(tags.JujuModel, env.Config().UUID())
-
-	machines, err := env.compute.cloudapi.ListMachines(filter)
-	*/
 	filter := cloudapi.VmDetails {
 		Tags: []string{
 			makeDanubeTag("group", "juju"),
 			makeDanubeTag(tags.JujuModel, env.Config().UUID()),
 		},
 	}
-	/*
-	// J XXX DELME
-	// filtering more than one status is not implemented yet
-	if len(statusFilters) > 0 {
-		filter.Status = statusFilters[0]
-	}*/
 
-
-	vmDetails, err := env.compute.cloudapi.ListMachinesFilteredFull(filter)
+	machines, err := env.compute.cloudapi.ListMachinesFilteredFull(filter)
 	if err != nil {
 		return nil, errors.Annotate(err, "cannot retrieve instances")
 	}
@@ -300,10 +283,14 @@ func (env *joyentEnviron) filteredInstances(ctx context.ProviderCallContext, sta
 		return false
 	}
 
-	for _, m := range vmDetails {
+	for _, m := range machines {
 		if len(statusFilters) == 0 || match(m.Status) {
-			copy := m
-			instances = append(instances, &joyentInstance{machine: &copy, env: env})
+            machineNics, err := env.compute.cloudapi.GetMachineNics(m.Uuid)
+            if err != nil {
+                return nil, errors.Annotate(err, "cannot retrieve instance nics info")
+            }
+
+            instances = append(instances, &joyentInstance{machine: &m, nics: machineNics, env: env})
 		}
 	}
 
@@ -455,19 +442,29 @@ func (env *joyentEnviron) FindInstanceSpec(
 }
 
 func instanceTypeFromConstraints(ic *instances.InstanceConstraint) instances.InstanceType {
+    var rootDiskSize uint64
+
+    if ic.Constraints.RootDisk != nil {
+        rootDiskSize = *ic.Constraints.RootDisk
+    } else {
+        // zero means default disk size
+        rootDiskSize = 0
+    }
+
     instanceType := instances.InstanceType{
         Id:       "default",
         Name:     "default",
         Arches:   []string{arch.AMD64},
         Mem:      *ic.Constraints.Mem,
         CpuCores: *ic.Constraints.CpuCores,
-        //J TODO
+        RootDisk: rootDiskSize,
         //RootDisk: uint64(pkg.Disk * 1024),
         VirtType: &vTypeVirtualmachine,
     }
     return instanceType
 }
 
+/*
 func instanceSpecFromConstraints(ic *instances.InstanceConstraint) *instances.InstanceSpec {
     // create one exactly matching instance
 	//allInstanceTypes := []instances.InstanceType{}
@@ -484,3 +481,29 @@ func instanceSpecFromConstraints(ic *instances.InstanceConstraint) *instances.In
         //order:        0,
     }
 }
+*/
+
+/**
+this function does several things:
+- find the image in the Danube Cloud installation
+- convert image uuid to image name (because the image can be saved under arbitrary name but the uuid stays)
+- if the image is not found, try to import it from the remote repo (this is only possible if we have ImageAdmin and ImageImportAdmin permissions
+**/
+//func (env *joyentEnviron) ensureImagePresent(imageUuid string) (*string, error) {
+func (env *joyentEnviron) ensureImagePresent(imageUuid string) (*cloudapi.Image, error) {
+    availableImages, err := env.compute.cloudapi.ListAttachedImages()
+	if err != nil {
+		return nil, errors.Annotate(err, "unable to get available images from Danube Cloud")
+	}
+
+    for _, img := range availableImages {
+        if img.Uuid == imageUuid {
+            // we've found the image
+            return &img, nil
+        }
+    }
+    // iage not foud
+    return nil, errors.New("Image not found in Danube Cloud. Please contact your Danube admin to attach the newest Ubuntu image downloaded from Danube Cloud to your virtual datacenter.")
+
+}
+
