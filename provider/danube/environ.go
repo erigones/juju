@@ -49,6 +49,9 @@ func newEnviron(cloud environs.CloudSpec, cfg *config.Config) (*joyentEnviron, e
 	return env, nil
 }
 
+//var _ environs.Environ = (*maasEnviron)(nil)	//J XXX delme
+var _ environs.Networking = (*joyentEnviron)(nil)
+
 func (env *joyentEnviron) SetName(envName string) {
 	env.name = envName
 }

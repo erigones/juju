@@ -26,6 +26,10 @@ func (inst *joyentInstance) Id() instance.Id {
 	return instance.Id(inst.machine.Uuid)
 }
 
+func (inst *joyentInstance) getNics() []cloudapi.VmNicDefinition {
+	return inst.nics
+}
+
 func (inst *joyentInstance) Status(ctx context.ProviderCallContext) instance.Status {
 	instStatus := inst.machine.Status
 	var jujuStatus status.Status
