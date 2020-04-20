@@ -6,11 +6,12 @@ package danube
 import (
 	"strings"
 	"sync"
-	//"time"
+	"time"
     "fmt"
 
 	"github.com/erigones/godanube/client"
 	"github.com/erigones/godanube/cloudapi"
+	dcerrors "github.com/erigones/godanube/errors"
 	"github.com/juju/errors"
 	"github.com/juju/utils/arch"
 	"github.com/juju/loggo"
@@ -31,9 +32,14 @@ import (
 var (
 	vTypeSmartmachine   = "smartmachine"
 	// J XXX
-	vTypeVirtualmachine = "kvm"
+	vTypeVirtualmachine = "kvm"	// j TODO add to simplestreams params
 	defaultCpuCores     = uint64(1)
 	defaultMem          = uint64(1024)
+
+    maxRepoRefreshAge    = time.Hour * 24 // when to issue remote img repo refresh
+    //remoteDanubeRepoName = "danubecloud"
+    remoteDanubeRepoName = "images.joyent.com"		// XXX Delme
+    dcGithubRepo = "https://github.com/erigones/esdc-ce"
 )
 
 type joyentCompute struct {
@@ -155,7 +161,7 @@ func (env *joyentEnviron) StartInstance(ctx context.ProviderCallContext, args en
     instTags := toDanubeTags(args.InstanceConfig.Tags)
     instMdata := map[string]string{"cloud-init:user-data": string(userData)}
 
-    imgInfo, err := env.ensureImagePresent(spec.Image.Id)
+    imgName, err := env.ensureImagePresent(spec.Image.Id)
 	if err != nil {
 		return nil, err
 	}
@@ -175,14 +181,23 @@ func (env *joyentEnviron) StartInstance(ctx context.ProviderCallContext, args en
                 // If disk size was not requested, RootDisk is zero.
                 // That means the resulting json will not contain disk size request.
 				Size:   int(spec.InstanceType.RootDisk),
-				Image:  imgInfo.Name,
+				Image:  *imgName,
 			},
 		},
-		Nics: []cloudapi.VmNicDefinition {
+	}
+
+	if !args.Constraints.HasSpaces() {
+		createMachineOpts.Nics = []cloudapi.VmNicDefinition {
+			{
+				Net:    "mynet",
+			},
+		}
+	} else {
+		createMachineOpts.Nics = []cloudapi.VmNicDefinition {
 			{
 				Net:    "admin",
 			},
-		},
+		}
 	}
 
     logger.Debugf("Creating new machine with following parameters: %+v", createMachineOpts)
@@ -201,16 +216,19 @@ func (env *joyentEnviron) StartInstance(ctx context.ProviderCallContext, args en
 	if err != nil || !strings.EqualFold(machineInfo.Status, "running") {
 		return nil, errors.Annotate(err, "cannot start instances")
 	}
+	/*
     machineNics, err := env.compute.cloudapi.GetMachineNics(machineId)
 	if err != nil {
 		return nil, errors.Annotate(err, "cannot start instances")
 	}
+	DELME XXX
+	*/
 
 	logger.Infof("started instance %q", machineId)
 
 	inst := &joyentInstance{
 		machine: machineInfo,
-        nics:    machineNics,
+        //nics:    machineNics,	DELME
 		env:     env,
 	}
 
@@ -285,12 +303,15 @@ func (env *joyentEnviron) filteredInstances(ctx context.ProviderCallContext, sta
 
 	for _, m := range machines {
 		if len(statusFilters) == 0 || match(m.Status) {
+			/*
             machineNics, err := env.compute.cloudapi.GetMachineNics(m.Uuid)
             if err != nil {
                 return nil, errors.Annotate(err, "cannot retrieve instance nics info")
             }
-
+			DELME XXX
             instances = append(instances, &joyentInstance{machine: &m, nics: machineNics, env: env})
+			*/
+            instances = append(instances, &joyentInstance{machine: &m, env: env})
 		}
 	}
 
@@ -483,14 +504,23 @@ func instanceSpecFromConstraints(ic *instances.InstanceConstraint) *instances.In
 }
 */
 
+func isInList(requested string, list []string) bool {
+    for _, item := range list {
+        if requested == item {
+            return true
+        }
+    }
+    return false
+}
+
 /**
 this function does several things:
 - find the image in the Danube Cloud installation
-- convert image uuid to image name (because the image can be saved under arbitrary name but the uuid stays)
-- if the image is not found, try to import it from the remote repo (this is only possible if we have ImageAdmin and ImageImportAdmin permissions
+- convert image uuid to image name (because the image itself can be saved under arbitrary name but the uuid stays)
+- if the image is not found, try to import it from the remote repo (this is only possible if we have ImageAdmin and ImageImportAdmin permissions)
 **/
-//func (env *joyentEnviron) ensureImagePresent(imageUuid string) (*string, error) {
-func (env *joyentEnviron) ensureImagePresent(imageUuid string) (*cloudapi.Image, error) {
+func (env *joyentEnviron) ensureImagePresent(imageUuid string) (*string, error) {
+//func (env *joyentEnviron) ensureImagePresent(imageUuid string) (*cloudapi.Image, error) {
     availableImages, err := env.compute.cloudapi.ListAttachedImages()
 	if err != nil {
 		return nil, errors.Annotate(err, "unable to get available images from Danube Cloud")
@@ -499,11 +529,100 @@ func (env *joyentEnviron) ensureImagePresent(imageUuid string) (*cloudapi.Image,
     for _, img := range availableImages {
         if img.Uuid == imageUuid {
             // we've found the image
-            return &img, nil
+            return &img.Name, nil
         }
     }
-    // iage not foud
-    return nil, errors.New("Image not found in Danube Cloud. Please contact your Danube admin to attach the newest Ubuntu image downloaded from Danube Cloud to your virtual datacenter.")
 
+    logger.Debugf("The image \"%s\" was not found locally, trying to import from repo \"%s\"", imageUuid, remoteDanubeRepoName)
+    errMsgGeneric := "Failed to retrieve requested image"
+
+    remoteImages, err := env.compute.cloudapi.ListRemoteImages(remoteDanubeRepoName)
+    if err != nil {
+       if dcerrors.IsNotAuthorized(err) {
+           // we do not have ImageImportAdmin rights
+           // nothing else can be done
+           return nil, errors.New("Requested image is not present on Danube Cloud installation and I don't have ImageImportAdmin rights to download it")
+       } else {
+           // generic error
+           return nil, errors.Annotate(err, errMsgGeneric)
+       }
+    }
+
+    if !isInList(imageUuid, remoteImages) {
+        // try to update repo
+        // but first chech last update time
+        imgRepo, err := env.compute.cloudapi.GetImgRepo(remoteDanubeRepoName)
+        if err != nil {
+            return nil, errors.Annotate(err, errMsgGeneric)
+        }
+
+        if imgRepo.LastUpdate.Add(maxRepoRefreshAge).Before(time.Now()) {
+            // repo needs update
+            if env.compute.cloudapi.RefreshImgRepo(remoteDanubeRepoName) != nil {
+                return nil, errors.Annotate(err, "Requested image is not present on Danube Cloud installation and remote repository refresh has failed during image import. Please try again later.")
+            }
+        }
+
+        // try again
+        remoteImages, err = env.compute.cloudapi.ListRemoteImages(remoteDanubeRepoName)
+        if err != nil {
+            return nil, errors.Annotate(err, errMsgGeneric)
+        }
+    }
+
+    if !isInList(imageUuid, remoteImages) {
+        return nil, errors.New("Requested image is not present on Danube Cloud installation and I also don't see it on a remote server. This might be a bug. Consider filling the issue at " + dcGithubRepo + "about inconsistent simplestreams image index")
+    }
+
+    // the remote image is found, let's download it
+    // get the remote image name
+    imgInfo, err := env.compute.cloudapi.GetRemoteImageInfo(imageUuid, remoteDanubeRepoName)
+    if err != nil {
+        return nil, errors.Annotate(err, errMsgGeneric)
+    }
+    // check if the image name is unused and alter it if neccessary
+    newName := fmt.Sprintf("%s-%s", imgInfo.Name, imgInfo.Version)
+    for i := 0; i < 100; i++ { // we don't expect 100 name collisions on the same version
+        found := false
+        if i > 0 {
+			oldName := newName
+            // format: imgname-1
+            newName = fmt.Sprintf("%s-%s-%d", imgInfo.Name, imgInfo.Version, i)
+			logger.Debugf("The image name \"%s\" is already taken. Trying \"%s\"", oldName, newName)
+        }
+        for _, img := range availableImages {
+            if img.Name == imgInfo.Name {
+                found = true
+                break
+            }
+        }
+        if !found {
+            break
+        }
+		found = false
+    }
+
+    if env.compute.cloudapi.ImportImage(imageUuid, newName, remoteDanubeRepoName) != nil {
+       if dcerrors.IsNotAuthorized(err) {
+           // we do not have ImageImportAdmin rights
+           // nothing else can be done
+           return nil, errors.New("Requested image is not present on Danube Cloud installation and I don't have ImageAdmin and ImageImportAdmin rights to download it")
+       } else if dcerrors.IsAlreadyExists(err) {
+            // This is the most tricky state. The image is already imported but it is not attached to this datacenter.
+            // The correction requires superadmin rights - to attach the image.
+            // So we'll error now and let the user know what's going on.
+            return nil, errors.New("The image is already present in Danube Cloud but it is not attached to our virtual datacenter. Please contact your Danube admin to attach the image \"" + imageUuid + "\" to your datacenter")
+        }
+        // generic error
+        return nil, errors.New("Failed to import requested image from remote repository \"" + remoteDanubeRepoName + "\"")
+    }
+
+    logger.Debugf("The image \"%s\" was found and imported successfully", imageUuid)
+    imgInfo, err = env.compute.cloudapi.GetAttachedImage(newName)
+    if err != nil {
+        return nil, errors.Annotate(err, errMsgGeneric)
+    }
+
+    return &imgInfo.Name, nil
 }
 

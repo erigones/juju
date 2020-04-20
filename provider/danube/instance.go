@@ -16,7 +16,7 @@ import (
 type joyentInstance struct {
 // J
 	machine *cloudapi.VmDetails
-	nics    []cloudapi.VmNicDefinition
+	//nics    []cloudapi.VmNicDefinition	DELME
 	env     *joyentEnviron
 }
 
@@ -24,10 +24,6 @@ var _ instances.Instance = (*joyentInstance)(nil)
 
 func (inst *joyentInstance) Id() instance.Id {
 	return instance.Id(inst.machine.Uuid)
-}
-
-func (inst *joyentInstance) getNics() []cloudapi.VmNicDefinition {
-	return inst.nics
 }
 
 func (inst *joyentInstance) Status(ctx context.ProviderCallContext) instance.Status {
@@ -52,8 +48,13 @@ func (inst *joyentInstance) Status(ctx context.ProviderCallContext) instance.Sta
 }
 
 func (inst *joyentInstance) Addresses(ctx context.ProviderCallContext) (network.ProviderAddresses, error) {
-	addresses := make([]network.ProviderAddress, 0, len(inst.nics))
-	for _, nic := range inst.nics {
+	machineNics, err := inst.env.compute.cloudapi.GetMachineNics(inst.machine.Uuid)
+	if err != nil {
+		return nil, err
+	}
+
+	addresses := make([]network.ProviderAddress, 0, len(machineNics))
+	for _, nic := range machineNics {
 		address := network.NewProviderAddress(nic.Ip)
 		if nic.Primary == true {
 			address.Scope = network.ScopePublic
@@ -63,5 +64,6 @@ func (inst *joyentInstance) Addresses(ctx context.ProviderCallContext) (network.
 		addresses = append(addresses, address)
 	}
 
+	logger.Debugf("Returning %d machine addresses", len(addresses))
 	return addresses, nil
 }
