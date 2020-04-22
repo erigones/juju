@@ -8,8 +8,9 @@ import (
 	"net"
 	"fmt"
 
-	"github.com/juju/errors"
 	"gopkg.in/juju/names.v3"
+	"github.com/juju/errors"
+	"github.com/erigones/godanube/cloudapi"
 
 	"github.com/juju/juju/core/instance"
 	corenetwork "github.com/juju/juju/core/network"
@@ -178,25 +179,8 @@ func (env *joyentEnviron) NetworkInterfaces(ctx context.ProviderCallContext, ids
 			return nil, err
 		}
 
-		ifaceList := make([]corenetwork.InterfaceInfo, 0, len(nics))
-		for index, nic := range nics {
-			nicInfo := corenetwork.InterfaceInfo{
-				// this struct wants primary interface on index 0
-				// but the real primary interface is determined by nic.Primary.
-				// We could swap primary interface with the first one if neccessary but it would not represent the interface ordering inside the machine
-				DeviceIndex:         index,
-				MACAddress:          nic.Mac,
-				ProviderId:          corenetwork.Id(nic.Net),
-				//ProviderSpaceId:     corenetwork.Id(space.Uuid),
-				ProviderSpaceId:     corenetwork.Id(nic.Net),
-				CIDR:                fmt.Sprintf("%s/%d", nic.Ip, ipMaskToPrefix(nic.Netmask)),
-				//InterfaceName:       fmt.Sprintf("eth%d", index),	// not guaranteed
-				//InterfaceName:       fmt.Sprintf("net%d", index),	// not guaranteed
-				InterfaceType:       corenetwork.EthernetInterface,
-				MTU:                 nic.Mtu,
-			}
-			ifaceList = append(ifaceList, nicInfo)
-		}
+		ifaceList := nicsToNetworkInfo(nics)
+
 		infos[idx] = ifaceList
 	}
 
@@ -204,4 +188,28 @@ func (env *joyentEnviron) NetworkInterfaces(ctx context.ProviderCallContext, ids
 		err = environs.ErrPartialInstances
 	}
 	return infos, err
+}
+
+
+func nicsToNetworkInfo(nics []cloudapi.VmNicDefinition) ([]corenetwork.InterfaceInfo) {
+	ifaceList := make([]corenetwork.InterfaceInfo, 0, len(nics))
+	for index, nic := range nics {
+		nicInfo := corenetwork.InterfaceInfo{
+			// this struct wants primary interface on index 0
+			// but the real primary interface is determined by nic.Primary.
+			// We could swap primary interface with the first one if neccessary but it would not represent the interface ordering inside the machine
+			DeviceIndex:         index,
+			MACAddress:          nic.Mac,
+			ProviderId:          corenetwork.Id(nic.Net),
+			//ProviderSpaceId:     corenetwork.Id(space.Uuid),
+			ProviderSpaceId:     corenetwork.Id(nic.Net),
+			CIDR:                fmt.Sprintf("%s/%d", nic.Ip, ipMaskToPrefix(nic.Netmask)),
+			//InterfaceName:       fmt.Sprintf("eth%d", index),	// not guaranteed
+			//InterfaceName:       fmt.Sprintf("net%d", index),	// not guaranteed
+			InterfaceType:       corenetwork.EthernetInterface,
+			MTU:                 nic.Mtu,
+		}
+		ifaceList = append(ifaceList, nicInfo)
+	}
+	return ifaceList
 }

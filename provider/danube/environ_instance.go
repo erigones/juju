@@ -216,13 +216,11 @@ func (env *joyentEnviron) StartInstance(ctx context.ProviderCallContext, args en
 	if err != nil || !strings.EqualFold(machineInfo.Status, "running") {
 		return nil, errors.Annotate(err, "cannot start instances")
 	}
-	/*
+
     machineNics, err := env.compute.cloudapi.GetMachineNics(machineId)
 	if err != nil {
 		return nil, errors.Annotate(err, "cannot start instances")
 	}
-	DELME XXX
-	*/
 
 	logger.Infof("started instance %q", machineId)
 
@@ -249,6 +247,8 @@ func (env *joyentEnviron) StartInstance(ctx context.ProviderCallContext, args en
 	return &environs.StartInstanceResult{
 		Instance: inst,
 		Hardware: &hc,
+		//DisplayName: instName,
+		NetworkInfo: nicsToNetworkInfo(machineNics),
 	}, nil
 }
 
@@ -276,7 +276,6 @@ func toDanubeTags(tags map[string]string) []string {
 	return ret
 }
 
-// AllRunningInstances implements environs.InstanceBroker.
 func (env *joyentEnviron) filteredInstances(ctx context.ProviderCallContext, statusFilters ...string) ([]instances.Instance, error) {
 	instances := []instances.Instance{}
 
@@ -303,15 +302,8 @@ func (env *joyentEnviron) filteredInstances(ctx context.ProviderCallContext, sta
 
 	for _, m := range machines {
 		if len(statusFilters) == 0 || match(m.Status) {
-			/*
-            machineNics, err := env.compute.cloudapi.GetMachineNics(m.Uuid)
-            if err != nil {
-                return nil, errors.Annotate(err, "cannot retrieve instance nics info")
-            }
-			DELME XXX
-            instances = append(instances, &joyentInstance{machine: &m, nics: machineNics, env: env})
-			*/
-            instances = append(instances, &joyentInstance{machine: &m, env: env})
+			copy := m
+			instances = append(instances, &joyentInstance{machine: &copy, env: env})
 		}
 	}
 
@@ -334,10 +326,11 @@ func (env *joyentEnviron) Instances(ctx context.ProviderCallContext, ids []insta
 	}
 
 	for i, id := range ids {
-		for _, instance := range allInstances {
-			if instance.Id() == id {
-				instances[i] = instance
+		for _, inst := range allInstances {
+			if inst.Id() == id {
+				instances[i] = inst
 				found++
+				break
 			}
 		}
 	}

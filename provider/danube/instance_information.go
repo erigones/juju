@@ -7,12 +7,12 @@ import (
 	//"github.com/juju/errors"
 
 	"github.com/juju/juju/core/constraints"
-	"github.com/juju/juju/environs"
+	//"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/instances"
 )
 
-var _ environs.InstanceTypesFetcher = (*joyentEnviron)(nil)
+//var _ environs.InstanceTypesFetcher = (*joyentEnviron)(nil)
 
 // InstanceTypes implements InstanceTypesFetcher
 func (env *joyentEnviron) InstanceTypes(ctx context.ProviderCallContext, c constraints.Value) (instances.InstanceTypesWithCostMetadata, error) {
